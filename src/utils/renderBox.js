@@ -1,14 +1,14 @@
 import labels from "./labels.json";
 
 /**
- * Render prediction boxes
+ * Render prediction polygons
  * @param {HTMLCanvasElement} canvasRef canvas tag reference
  * @param {Array} boxes_data boxes array
  * @param {Array} scores_data scores array
  * @param {Array} classes_data class array
  * @param {Array[Number]} ratios boxes ratio [xRatio, yRatio]
  */
-export const renderBoxes = (canvasRef, boxes_data, scores_data, classes_data, ratios) => {
+export const renderPolygons = (canvasRef, boxes_data, scores_data, classes_data, ratios) => {
   const ctx = canvasRef.getContext("2d");
   ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height); // clean canvas
 
@@ -28,22 +28,36 @@ export const renderBoxes = (canvasRef, boxes_data, scores_data, classes_data, ra
     const color = colors.get(classes_data[i]);
     const score = (scores_data[i] * 100).toFixed(1);
 
-    let [y1, x1, y2, x2] = boxes_data.slice(i * 4, (i + 1) * 4);
+    let [y1, x1, y2, x2, y3, x3, y4, x4] = boxes_data.slice(i * 8, (i + 1) * 8);
     x1 *= ratios[0];
     x2 *= ratios[0];
+    x3 *= ratios[0];
+    x4 *= ratios[0];
     y1 *= ratios[1];
     y2 *= ratios[1];
-    const width = x2 - x1;
-    const height = y2 - y1;
+    y3 *= ratios[1];
+    y4 *= ratios[1];
 
-    // draw box.
+    // draw polygon
     ctx.fillStyle = Colors.hexToRgba(color, 0.2);
-    ctx.fillRect(x1, y1, width, height);
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.lineTo(x3, y3);
+    ctx.lineTo(x4, y4);
+    ctx.closePath();
+    ctx.fill();
 
-    // draw border box.
+    // draw border polygon
     ctx.strokeStyle = color;
     ctx.lineWidth = Math.max(Math.min(ctx.canvas.width, ctx.canvas.height) / 200, 2.5);
-    ctx.strokeRect(x1, y1, width, height);
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.lineTo(x3, y3);
+    ctx.lineTo(x4, y4);
+    ctx.closePath();
+    ctx.stroke();
 
     // Draw the label background.
     ctx.fillStyle = color;
@@ -97,8 +111,8 @@ class Colors {
     var result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
     return result
       ? `rgba(${[parseInt(result[1], 16), parseInt(result[2], 16), parseInt(result[3], 16)].join(
-          ", "
-        )}, ${alpha})`
+        ", "
+      )}, ${alpha})`
       : null;
   };
 }

@@ -1,5 +1,5 @@
 import * as tf from "@tensorflow/tfjs";
-import { renderBoxes } from "./renderBox";
+import { renderPolygons } from "./renderBox";
 import labels from "./labels.json";
 
 const numClass = labels.length;
@@ -38,14 +38,7 @@ const preprocess = (source, modelWidth, modelHeight) => {
   return [input, xRatio, yRatio];
 };
 
-/**
- * Function run inference and do detection from source.
- * @param {HTMLImageElement|HTMLVideoElement} source
- * @param {tf.GraphModel} model loaded YOLOv8 tensorflow.js model
- * @param {HTMLCanvasElement} canvasRef canvas reference
- * @param {VoidFunction} callback function to run after detection process
- */
-export const detect = async (source, model, canvasRef, callback = () => {}) => {
+export const detect = async (source, model, canvasRef, callback = () => { }) => {
   const [modelWidth, modelHeight] = model.inputShape.slice(1, 3); // get model width and height
 
   tf.engine().startScope(); // start scoping tf engine
@@ -63,8 +56,8 @@ export const detect = async (source, model, canvasRef, callback = () => {}) => {
         [
           y1,
           x1,
-          tf.add(y1, h), //y2
-          tf.add(x1, w), //x2
+          tf.add(y1, h), // y2
+          tf.add(x1, w), // x2
         ],
         2
       )
@@ -83,7 +76,24 @@ export const detect = async (source, model, canvasRef, callback = () => {}) => {
   const scores_data = scores.gather(nms, 0).dataSync(); // indexing scores by nms index
   const classes_data = classes.gather(nms, 0).dataSync(); // indexing classes by nms index
 
-  renderBoxes(canvasRef, boxes_data, scores_data, classes_data, [xRatio, yRatio]); // render boxes
+  // Transform boxes to 4-point polygons
+  const polygons_data = [];
+  for (let i = 0; i < boxes_data.length; i += 4) {
+    const y1 = boxes_data[i];
+    const x1 = boxes_data[i + 1];
+    const y2 = boxes_data[i + 2];
+    const x2 = boxes_data[i + 3];
+
+    // Define the 4 points of the polygon (rectangle in this case)
+    polygons_data.push(
+      y1, x1, // top-left
+      y1, x2, // top-right
+      y2, x2, // bottom-right
+      y2, x1  // bottom-left
+    );
+  }
+
+  renderPolygons(canvasRef, polygons_data, scores_data, classes_data, [xRatio, yRatio]); // render polygons
   tf.dispose([res, transRes, boxes, scores, classes, nms]); // clear memory
 
   callback();
@@ -91,27 +101,83 @@ export const detect = async (source, model, canvasRef, callback = () => {}) => {
   tf.engine().endScope(); // end of scoping
 };
 
+
 /**
- * Function to detect video from every source.
- * @param {HTMLVideoElement} vidSource video source
+ * Function run inference and do detection from source.
+ * @param {HTMLImageElement|HTMLVideoElement} source
  * @param {tf.GraphModel} model loaded YOLOv8 tensorflow.js model
- * @param {HTMLCanvasElement} canvasRef canvas reference
  */
-export const detectVideo = (vidSource, model, canvasRef) => {
-  /**
-   * Function to detect every frame from video
-   */
-  const detectFrame = async () => {
-    if (vidSource.videoWidth === 0 && vidSource.srcObject === null) {
-      const ctx = canvasRef.getContext("2d");
-      ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height); // clean canvas
-      return; // handle if source is closed
+export const detect_obb = async (source, model, canvasRef, callback = () => { }) => {
+  tf.engine().startScope(); // start scoping tf engine
+  const [input, xRatio, yRatio] = preprocess(source, 640, 640); // preprocess image
+
+  const res = model.net.execute(input); // inference model
+  const transRes = res.transpose([0, 2, 1]); // transpose result [b, det, n] => [b, n, det]
+
+  const boxes = tf.tidy(() => {
+    const w = transRes.slice([0, 0, 2], [-1, -1, 1]); // get width
+    const h = transRes.slice([0, 0, 3], [-1, -1, 1]); // get height
+    const x_center = transRes.slice([0, 0, 0], [-1, -1, 1]); // x center
+    const y_center = transRes.slice([0, 0, 1], [-1, -1, 1]); // y center
+    const rotation = transRes.slice([0, 0, transRes.shape[2] - 1], [-1, -1, 1]); // rotation, between -π/2 to π/2 radians
+    const boxes = tf.concat([x_center, y_center, w, h, rotation], 2).squeeze(); // x_center, y_center, width, height, rotation
+    return boxes;
+  });
+
+  const [scores, classes] = tf.tidy(() => {
+    const rawScores = transRes.slice([0, 0, 4], [-1, -1, numClass]).squeeze(0); // class scores
+    return [rawScores.max(1), rawScores.argMax(1)];
+  });
+
+  const boxesForNMS = boxes.slice([0, 0], [-1, 4]);
+
+  const nms = await tf.image.nonMaxSuppressionAsync(boxesForNMS, scores, 500, 0.45, 0.2); // NMS to filter boxes
+
+  const boxes_data = boxes.gather(nms, 0).dataSync(); // indexing boxes by nms index
+  const scores_data = scores.gather(nms, 0).dataSync(); // indexing scores by nms index
+  const classes_data = classes.gather(nms, 0).dataSync(); // indexing classes by nms index
+
+  // Convert boxes and rotation to 4 corners
+  const polygons_data = [];
+  for (let i = 0; i < boxes_data.length; i += 5) {
+    const x_center = boxes_data[i] * xRatio;
+    const y_center = boxes_data[i + 1] * yRatio;
+    const width = boxes_data[i + 2] * xRatio;
+    const height = boxes_data[i + 3] * yRatio;
+    const radians = boxes_data[i + 4];
+
+    const corners = getCorners(x_center, y_center, width, height, radians);
+
+    for (const [x, y] of corners) {
+      polygons_data.push(y, x); // Notice the y, x order for correct format
     }
+  }
 
-    detect(vidSource, model, canvasRef, () => {
-      requestAnimationFrame(detectFrame); // get another frame
-    });
-  };
+  renderPolygons(canvasRef, polygons_data, scores_data, classes_data, [xRatio, yRatio]); // render polygons
 
-  detectFrame(); // initialize to detect every frame
+  tf.dispose([res, transRes, boxes, scores, classes, nms]); // clear memory
+  tf.engine().endScope(); // end of scoping
+  return [boxes_data, scores_data, classes_data];
 };
+
+// Function to calculate the 4 corners of the rotated bounding box
+function getCorners(x_center, y_center, width, height, radians) {
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+
+  const halfWidth = width / 2;
+  const halfHeight = height / 2;
+
+  const corners = [
+    [-halfWidth, -halfHeight],
+    [halfWidth, -halfHeight],
+    [halfWidth, halfHeight],
+    [-halfWidth, halfHeight]
+  ];
+
+  return corners.map(([dx, dy]) => {
+    const x = x_center + dx * cos - dy * sin;
+    const y = y_center + dx * sin + dy * cos;
+    return [x, y];
+  });
+}
